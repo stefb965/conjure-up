@@ -39,3 +39,7 @@ if [[ ! -f /snap/bin/juju ]]; then
     # to the juju snap if that is installed later.
     ln -s conjure-up.juju /snap/bin/juju
 fi
+
+if [[ ! -f /snap/bin/lxd ]]; then
+    snap install lxd
+fi

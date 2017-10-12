@@ -7,7 +7,12 @@ from subprocess import CalledProcessError
 from urllib.parse import urljoin, urlparse
 
 from pkg_resources import parse_version
-from ubuntui.widgets.input import PasswordEditor, StringEditor, YesNo
+from ubuntui.widgets.input import (
+    PasswordEditor,
+    StringEditor,
+    YesNo,
+    SelectorHorizontal
+)
 from urwid import Text
 
 from conjureup import utils
@@ -29,11 +34,13 @@ A typical schema is:
 'login':     - If subsequent views require specific provider
                information, make sure to log into those relevant apis
 'fields': [] - editable fields in the ui, each field can contain:
-  'label'    - Friendly label to the user
-  'widget'   - Input widget
-  'key'      - key that matches what the provider expects for authentication
-  'storable' - if False will skip storing key=value in credentials
-  'validator'- Function to check validity, returns (Boolean, "Optional error")
+  'label'      - Friendly label to the user
+  'widget'     - Input widget
+  'key'        - key that matches what the provider expects for authentication
+  'storable'   - if False will skip storing key=value in credentials
+  'validator'  - Function to check validity, returns (Boolean, "Optional error")
+  'depends'    - Function to determine depends_on fields are True
+  'conflicts'  - Conflict function with other existing field widgets
 """
 
 
@@ -48,7 +55,8 @@ class Field:
                  storable=True,
                  error=None,
                  required=True,
-                 validator=None):
+                 validator=None,
+                 conflicts=None):
         self.label = label
         self.widget = widget
         self.key = key
@@ -56,6 +64,7 @@ class Field:
         self.error = Text("")
         self.required = required
         self.validator = validator
+        self._conflicts = conflicts
 
     def validate(self):
         """ Validator for field
@@ -71,6 +80,15 @@ class Field:
                 self.error.set_text(msg)
                 return False
         return True
+
+    def conflicts(self):
+        """ Conflict routine
+        """
+        try:
+            return self._conflicts() is True
+        except TypeError:
+            # skip here as no conflict handler exists
+            return False
 
     @property
     def value(self):
@@ -347,6 +365,37 @@ class Localhost(BaseProvider):
         self.minimum_support_version = parse_version('2.17')
         self.available = False
         self._set_lxd_dir_env()
+        self.networks = []
+        self.storage_pools = []
+        self.form = Form(
+            [
+                Field(
+                    label='Network bridge Name',
+                    widget=SelectorHorizontal(
+                        [net for net in self.networks]),
+                    key='bridge'
+                ),
+                Field(
+                    label='Network bridge Name',
+                    widget=StringEditor(default='lxdbr0'),
+                    key='bridge',
+                    conflicts=partial(self.has_bridges)
+                ),
+                Field(
+                    label='Network bridge subnet',
+                    widget=StringEditor(default='10.10.1.0/24'),
+                    key='subnet',
+                    conflicts=partial(self.has_bridges)
+                )
+            ]
+        )
+
+    def has_bridges(self):
+        """ Checks for existing bridges
+        """
+        if len(self.networks) > 0:
+            return True
+        return False
 
     def _set_lxd_dir_env(self):
         """ Sets and updates correct environment
@@ -382,11 +431,26 @@ class Localhost(BaseProvider):
             app.log.error(e)
             raise LocalhostError(e)
 
+    async def _create_network(self):
+        """ Creates a LXD bridge
+        """
+        bridge = self.form.field('bridgename').value
+        subnet = self.form.field('subnet').value
+        try:
+            cmd = ['lxc', 'network', 'create', bridge,
+                   'ipv4.address={}'.format(subnet), 'ipv4.nat=true',
+                   'ipv6.address=none', 'ipv6.nat=false']
+            _, out, err = await utils.arun(cmd)
+        except CalledProcessError as e:
+            app.log.error(e)
+            return (False, err)
+        return (True, None)
+
     async def get_networks(self):
         """ Grabs lxc network bridges from api
         """
         networks = await self.query('networks')
-        bridges = OrderedDict()
+        self.networks = OrderedDict()
         for net in networks:
             net_info = await self.query(net)
             if 'config' in net_info and 'ipv6.address' in net_info['config']:
@@ -394,10 +458,9 @@ class Localhost(BaseProvider):
                 if net_info['config']['ipv6.address'] != 'none':
                     continue
             if net_info['type'] == "bridge":
-                bridges[net_info['name']] = net_info
+                self.networks[net_info['name']] = net_info
                 if net_info['name'] == 'lxdbr0':
-                    bridges.move_to_end('lxdbr0', last=False)
-        return bridges
+                    self.networks.move_to_end('lxdbr0', last=False)
 
     async def get_storage_pools(self):
         """ Grabs lxc storage pools from api
@@ -409,7 +472,7 @@ class Localhost(BaseProvider):
             _pools[pool_path.stem] = await self.query(pool)
             if pool_path.stem == 'default':
                 _pools.move_to_end('default', last=False)
-        return _pools
+        self.storage_pools = _pools
 
     async def is_server_available(self):
         """ Waits and checks if LXD server becomes available

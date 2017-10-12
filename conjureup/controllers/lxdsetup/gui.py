@@ -13,12 +13,13 @@ class LXDSetupControllerError(Exception):
 
 class LXDSetupController(common.BaseLXDSetupController):
     async def get_lxd_devices(self):
-        self.devices = {
-            'networks': await app.provider.get_networks(),
-            'storage-pools': await app.provider.get_storage_pools()
-        }
-
-        self.view = LXDSetupView(self.devices, self.finish)
+        # self.devices = {
+        #     'networks': await app.provider.get_networks(),
+        #     'storage-pools': await app.provider.get_storage_pools()
+        # }
+        await app.provider.get_networks()
+        await app.provider.get_storage_pools()
+        self.view = LXDSetupView(self.finish)
         self.view.show()
 
     async def set_lxd_info(self, network, storage_pool):
